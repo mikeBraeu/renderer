@@ -2,12 +2,15 @@ import Codec.Picture
 import Codec.Picture.Types
 import Data.Vector as V
 import Debug.Trace
+import Control.Monad
 
 {-
 General algebra stuff
 -}
 
-data Point = Point Double Double Double deriving (Eq, Show)
+type RealType = Double
+
+data Point = Point RealType RealType RealType deriving (Eq, Show)
 
 add :: Point -> Point -> Point
 add (Point a b c) (Point d e f) = Point (a + d) (b + e) (c + f)
@@ -15,10 +18,10 @@ add (Point a b c) (Point d e f) = Point (a + d) (b + e) (c + f)
 diff :: Point -> Point -> Point
 diff (Point a b c) (Point d e f) = Point (a - d) (b - e) (c - f)
 
-scale :: Double -> Point -> Point
+scale :: RealType -> Point -> Point
 scale k (Point a b c) = Point (k*a) (k*b) (k*c)
 
-dot :: Point -> Point -> Double
+dot :: Point -> Point -> RealType
 dot (Point a b c) (Point d e f) = a*d + b*e + c*f
 
 pointwise :: Point -> Point -> Point
@@ -27,10 +30,10 @@ pointwise (Point x y z) (Point a b c) = Point (x*a) (y*b) (z*c)
 cross :: Point -> Point -> Point
 cross (Point a b c) (Point d e f) = Point (b*f - c*e) (c*d - a*f) (a*e - d*b)
 
-dist :: Point -> Point -> Double
+dist :: Point -> Point -> RealType
 dist a b = len $ diff a b
 
-len :: Point -> Double
+len :: Point -> RealType
 len p = sqrt (dot p p)
 
 norm :: Point -> Point
@@ -42,7 +45,7 @@ mkNormVect :: Point -> Point -> Point
 mkNormVect p q = norm $ diff q p
 
 -- coeffs to real roots
-solvePoly :: [Double] -> [Double]
+solvePoly :: [RealType] -> [RealType]
 solvePoly []          = error "degree to low"
 solvePoly [a]         = error "degree to low"
 solvePoly [a,b]       = [-b/a]
@@ -56,12 +59,8 @@ solvePoly [a,b,c]     = let d = b*b - 4*a*c
 Data structures and closely related functions
 -}
 
-data Object = Plane Point Double
-              | Sphere Point Double deriving (Eq, Show)
-
-isSphere :: Object -> Bool
-isSphere (Plane a b) = False
-isSphere _ = True
+data Object = Plane Point RealType
+              | Sphere Point RealType deriving (Eq, Show)
 
 data Light = PointL Point Colour
 
@@ -79,28 +78,23 @@ data Scene = Scene {objects :: [ColouredObject], cam :: Camera, lights :: [Light
 
 data Camera = Camera Point Point Point
 
+data Intersection = Intersection {intDist' :: RealType, intRay :: Ray, intObj:: ColouredObject} deriving (Eq, Show)
 
-data Intersection = Intersection Double Ray ColouredObject deriving (Eq, Show)
-
-sphereint :: Intersection -> Bool
-sphereint (Intersection d r (o, c)) = case o of
-                                        Sphere a b -> True
-                                        Plane a b -> False
 
 {-
 raytracer
 -}
 
-maxF :: Double -> Point -> Point
+maxF :: RealType -> Point -> Point
 maxF f (Point x y z) = Point (max x f) (max y f) (max z f)
 
-minF :: Double -> Point -> Point
+minF :: RealType -> Point -> Point
 minF f (Point x y z) = Point (min x f) (min y f) (min z f)
 
 clip :: Point -> Point
 clip = (maxF 0.0) . (minF 1.0)
 
-intersectdists :: Ray -> Object -> [Double]
+intersectdists :: Ray -> Object -> [RealType]
 intersectdists (Ray start dir) (Plane norm d) =
   let part  = dot dir norm
       para  = abs(part) < 10**(-9)
@@ -117,71 +111,66 @@ getNormal p (Sphere cen rad) = norm $ scale (1/rad) $ diff p cen
 
 
 
-intDist :: (Maybe Intersection) -> Double
-intDist Nothing = 0
-intDist (Just (Intersection d _ _)) = d
+intCol' :: Intersection -> Colour
+intCol' (Intersection _ _ (o, c)) = c
 
-intCol :: (Maybe Intersection) -> Colour
-intCol Nothing = Point 0 0 0
-intCol (Just (Intersection _ _ (o, c))) =  c
 
-normAt :: (Maybe Intersection) -> Point
-normAt Nothing = Point 0 0 0
-normAt i@(Just (Intersection _ _ (o, _))) = getNormal (intPt i) o
+normAt' :: Intersection -> Point
+normAt' i@(Intersection _ _ (o, _)) = getNormal (intPt' i) o
 
-intPt :: (Maybe Intersection) -> Point
-intPt Nothing = Point 0 0 0
-intPt (Just (Intersection d (Ray start dir) _)) = add start $ scale d dir
 
-fstPos :: [Double] -> Double
+intPt' :: Intersection -> Point
+intPt' (Intersection d (Ray start dir) _) = add start $ scale d dir
+
+fstPos :: [RealType] -> RealType
 fstPos [] = 0.0
 fstPos (l:ls) = if l > 10**(-6) then l else fstPos ls
 
-isPlane :: Object -> Bool
-isPlane (Sphere a b) = False
-isPlane _ = True
 
 closestInt :: Ray -> (Maybe Intersection) -> ColouredObject -> (Maybe Intersection)
-closestInt r i (p, c) = if d > 10**(-6) && ((isNothing i) || d < (intDist i))
-  then Just (Intersection d r (p, c))
-  else i
+closestInt r i (p, c) = if d <= 10**(-6) || (not (isNothing i) && (intDist' $ fromJust i) <= d)
+  then i
+  else Just (Intersection d r (p, c))
     where
       d = fstPos $ intersectdists r p
 
+
 intersect :: Ray -> [ColouredObject] -> Maybe Intersection
-intersect r p = case Prelude.foldl (closestInt r) Nothing p of
-                    Nothing ->  Prelude.foldl (closestInt r) Nothing p
-                    _ -> Prelude.foldl (closestInt r) Nothing p
+intersect r p = Prelude.foldl (closestInt r) Nothing p
 
 
 -- diffuse shading only
 
-diffuse :: (Maybe Intersection) -> Light -> Colour
-diffuse i (PointL pos col) = pointwise (scale (dot (mkNormVect (intPt i) pos) (normAt i)) col) (intCol i)
+
+diffuse :: Intersection -> Light -> Colour
+diffuse i (PointL pos col) = pointwise (scale (dot (mkNormVect (intPt' i) pos) (normAt' i)) col) (intCol' i)
+
+
 
 shadePt :: Intersection -> Point -> [ColouredObject] -> Light -> Colour
-shadePt i d o l@(PointL pos col)
-  | s = Point 0 0 0
-  | otherwise = diffuse (Just i) l
-    where
-    s = not(isNothing i_s)  && (intDist i_s) <= dist (intPt (Just i)) pos
-    i_s = intersect (mkRay (intPt (Just i)) pos) o
+shadePt i d o l@(PointL pos col) =
+  let pt  = intPt' i
+      i_s = intersect (mkRay pt pos) o
+      s = not (isNothing i_s) && (intDist' $ fromJust i_s) <= dist pt pos
+        in if s then Point 0 0 0 else diffuse i l
 
-colourPt :: Ray -> Colour -> [ColouredObject] -> [Light] -> Colour
-colourPt r@(Ray _ dir) b objs lts =
-  let   i             = intersect r objs
-        c             = intCol i
-        shadeColour   = Prelude.foldl add (Point 0.0 0.0 0.0) (Prelude.map (shadePt (fromJust i) dir objs) lts)
-          in case i of
-              Nothing -> b
-              Just (Intersection d r (o, c)) -> case (o, shadeColour) of
-                                                  (Sphere p rad, Point 0 0 0) -> trace ("Sphere dot: " Prelude.++ (show r)) $ clip $ shadeColour
-                                                  x -> clip $ shadeColour
 
---if (isNothing i) then b else clip $ shadeColour
+
+colourPt :: Ray -> [ColouredObject] -> [Light] -> Maybe Colour
+colourPt r@(Ray _ dir)  objs lts =
+  do  i <- intersect r objs
+      let shadeColour = Prelude.foldl add
+                          (Point 0.0 0.0 0.0)
+                          (Prelude.map (shadePt i dir objs) lts)
+       in return $ clip $ shadeColour
+
+
 
 rayTracePt :: Scene -> Point -> Colour
-rayTracePt (Scene objs (Camera campos _ _) lts amb) p = colourPt (Ray p (mkNormVect campos p)) amb objs lts
+rayTracePt (Scene objs (Camera campos _ _) lts amb) p =
+  let mcol = colourPt (Ray p (mkNormVect campos p)) objs lts
+        in if (isNothing mcol) then amb else fromJust mcol
+
 
 isNothing :: Maybe a -> Bool
 isNothing (Just x) = False
@@ -240,8 +229,8 @@ light1 = PointL (Point 0 2 16) (Point 0.7 0.7 0.7)
 
 scene1 = Scene colouredobjs1 camera1 [light1] (Point 0.4 0.4 0.4)
 
-xres = 2000
-yres = 2000
+xres = 200
+yres = 200
 res1 = (xres, yres)
 
 xdim = 1
